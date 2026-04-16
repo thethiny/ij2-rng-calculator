@@ -17,11 +17,14 @@ _MANTISSA_MASK = 0x7FFFFF  # Low 23 bits (IEEE 754 single-precision mantissa)
 _FLOAT_ONE_BITS = 0x3F800000  # IEEE 754 representation of 1.0f
 _INT31_MASK = 0x7FFFFFFF  # 31-bit mask for unsigned int random values
 _UINT32_MOD = 0x100000000  # 2^32
+_PACK_FLOAT = struct.Struct("f").pack
+_UNPACK_FLOAT = struct.Struct("f").unpack
+_PACK_UINT32 = struct.Struct("I").pack
 
 
 def f32(x: float) -> float:
     """Cast a Python float to IEEE 754 single-precision (float32), matching C float behavior."""
-    return struct.unpack("f", struct.pack("f", x))[0]
+    return _UNPACK_FLOAT(_PACK_FLOAT(x))[0]
 
 
 def lcg_to_float(seed: int) -> float:
@@ -36,7 +39,7 @@ def lcg_to_float(seed: int) -> float:
     then subtracts 1.0 to produce [0.0, 1.0).
     """
     bits = (seed & _MANTISSA_MASK) | _FLOAT_ONE_BITS
-    f = struct.unpack("f", struct.pack("I", bits))[0]
+    f = _UNPACK_FLOAT(_PACK_UINT32(bits))[0]
     return f - 1.0
 
 
