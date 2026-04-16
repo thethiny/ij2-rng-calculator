@@ -34,7 +34,7 @@ The game client generates gear stats deterministically from three inputs stored 
 }
 ```
 
-The full pipeline is implemented in `EquipmentSaveData::CacheGeneratedData` (ij2_all_0166.c:5160):
+The full pipeline is implemented in `EquipmentSaveData::CacheGeneratedData`:
 
 ### Step 1: Initialize LCG
 
@@ -52,7 +52,7 @@ Constants: multiplier `0x0BB40E65`, increment `0x36156A3B`, modulus `2^32`.
 
 ### Step 2: GetRandomAsset (Visual Variant)
 
-Before stat generation, `ItemDefinition::GetRandomAsset` (ij2_all_0168.c:14680) selects the visual variant for group items:
+Before stat generation, `ItemDefinition::GetRandomAsset` selects the visual variant for group items:
 
 ```c
 if (mAssetGroupIndex != -1 && group.mItems.ArrayNum > 1) {
@@ -69,7 +69,7 @@ Whether a group has >1 assets is determined by `ITEMDEFINITIONSAUX.xxx`, not the
 
 ### Step 3: Attribute Selection (Non-Power Path)
 
-Since `usePowerWhenGeneratingItems = false`, the game uses `AttributeList::Add` (ij2_all_0165.c:9822) instead of `GenerateAttributes`. This path processes the item's selectors sequentially using the global LCG stream.
+Since `usePowerWhenGeneratingItems = false`, the game uses `AttributeList::Add` instead of `GenerateAttributes`. This path processes the item's selectors sequentially using the global LCG stream.
 
 Each item's `a.s` array defines selectors:
 ```json
@@ -114,7 +114,7 @@ This uniformly selects from the attribute set's direct attributes (and sub-selec
 
 #### Value Generation
 
-For each picked base stat attribute (Health, Defense, Strength, Ability), the `"value"` parameter is read via `SerializeFrom` (ij2_all_0169.c:17607):
+For each picked base stat attribute (Health, Defense, Strength, Ability), the `"value"` parameter is read via `SerializeFrom`:
 
 ```c
 // Non-power path: random value in [min, max]
@@ -126,7 +126,7 @@ The `"set"` parameter (always min=max=0) does **not** advance the LCG.
 
 ### Step 4: Scale Factor
 
-`CalculateScaleFactor` (ij2_all_0166.c:5301) computes a level-based multiplier using the item's **design level** (`dL` field, typically 20):
+`CalculateScaleFactor` computes a level-based multiplier using the item's **design level** (`dL` field, typically 20):
 
 ```c
 effectiveLevel = clamp(mLevel, minLevel, maxLevel);
@@ -150,7 +150,7 @@ Note: `dL` (design level), not `h` (max level = 30), controls the scaling curve.
 
 ### Step 5: Per-Pick Scaling
 
-The scale factor is applied to **each attribute pick independently** via `Multiply` (ij2_all_0169.c:2522), then `GetValue` (ij2_all_0168.c:16966) **sums** all picks per stat:
+The scale factor is applied to **each attribute pick independently** via `Multiply`, then `GetValue` **sums** all picks per stat:
 
 ```c
 // Multiply (called per-pick via vtable[3])
@@ -166,9 +166,9 @@ This is critical: `int(147 * 0.432) + int(83 * 0.432) = 63 + 35 = 98`, **not** `
 
 ## Power Is Not Used for Stats
 
-The geardefinitionlist sets `usePowerWhenGeneratingItems: false`. This means the `Power` field in the inventory **does not affect stat generation**. It only affects the sell price calculation in `GetSellValue` (ij2_all_0168.c:15196).
+The geardefinitionlist sets `usePowerWhenGeneratingItems: false`. This means the `Power` field in the inventory **does not affect stat generation**. It only affects the sell price calculation in `GetSellValue`.
 
-The server accepts any Power value (0-255) without validation. The game client defaults uninitialized power to 256 (stored as `*(_WORD *)&__that.mPower = 256` in ij2_all_0169.c:8290), which is clamped to 100 in `CacheGeneratedData`.
+The server accepts any Power value (0-255) without validation. The game client defaults uninitialized power to 256 (stored as `*(_WORD *)&__that.mPower = 256`), which is clamped to 100 in `CacheGeneratedData`.
 
 ## Attribute Sets
 
