@@ -46,7 +46,7 @@ def get_assets_for_item(hashmap: dict, item_index: int):
     return None
 
 
-def build_generator(catalog_data: dict, mode="fast") -> Union[StatGenerator, FastStatGenerator]:
+def build_generator(catalog_data: dict, mode="default") -> Union[StatGenerator, FastStatGenerator]:
     if mode == "default":
         return StatGenerator(
             geardefinitionlist_data=catalog_data,
