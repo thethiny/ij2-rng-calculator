@@ -29,6 +29,7 @@ from .consts import (
     SCALE_BOOST_BELOW_MAX,
 )
 from .lcg import LCGStream, f32, lcg_to_float, lcg_to_int_range
+from .seed_archive import IJ2SeedArchive
 
 AssetsParam = Optional[Union[List[str], str]]
 
@@ -255,6 +256,178 @@ if _NUMBA_ENABLED:
             best_total_stats,
         )
 
+    @njit(cache=True, nogil=True)
+    def _build_seed_archive_numba(
+        selector_cts,
+        selector_thresholds,
+        selector_direct_counts,
+        selector_total_counts,
+        selector_steps,
+        selector_attr_starts,
+        attr_stat_slots,
+        attr_value_lo,
+        attr_value_hi,
+        attr_advance_counts,
+        scale_lookup,
+        asset_count,
+        float_lut,
+        multiplier,
+        increment,
+        max_pick_count,
+    ):
+        seed_count = 0x10000
+        visual_indices = np.zeros(seed_count, dtype=np.uint16)
+        pick_counts = np.zeros(seed_count, dtype=np.uint8)
+        stat_ids = np.zeros((seed_count, max_pick_count), dtype=np.uint8)
+        raw_values = np.zeros((seed_count, max_pick_count), dtype=np.uint16)
+
+        best_values = np.full(4, -1, dtype=np.int32)
+        best_totals = np.full(4, -1, dtype=np.int32)
+        best_seeds = np.zeros(4, dtype=np.int32)
+        best_stats = np.zeros((4, 4), dtype=np.int32)
+        best_visual_indices = np.zeros(4, dtype=np.int32)
+        best_total_value = -1
+        best_total_seed = 0
+        best_total_stats = np.zeros(4, dtype=np.int32)
+        best_total_visual_index = 0
+
+        mask = np.int64(_UINT32_MASK)
+        int31_mask = np.int64(_INT31_MASK)
+        mantissa_mask = np.int64(0x7FFFFF)
+
+        for seed in range(seed_count):
+            state = np.int64(seed)
+            visual_index = 0
+            if asset_count > 1:
+                state = (multiplier * state + increment) & mask
+                visual_index = int((state & int31_mask) % asset_count)
+
+            stats0 = 0
+            stats1 = 0
+            stats2 = 0
+            stats3 = 0
+            pick_write = 0
+
+            for selector_index in range(selector_cts.shape[0]):
+                state = (multiplier * state + increment) & mask
+                if selector_thresholds[selector_index] < float_lut[state & mantissa_mask]:
+                    continue
+
+                direct_count = selector_direct_counts[selector_index]
+                total_count = selector_total_counts[selector_index]
+                if total_count <= 0:
+                    continue
+
+                last_index = total_count - 1
+                step = selector_steps[selector_index]
+                attr_start = selector_attr_starts[selector_index]
+
+                for _ in range(selector_cts[selector_index]):
+                    state = (multiplier * state + increment) & mask
+                    r = float_lut[state & mantissa_mask]
+                    idx = 0
+                    while step < r and idx < last_index:
+                        idx += 1
+                        r = np.float32(r - step)
+
+                    if idx >= direct_count:
+                        continue
+
+                    attr_index = attr_start + idx
+                    stat_slot = attr_stat_slots[attr_index]
+                    value_lo = attr_value_lo[attr_index]
+                    value_hi = attr_value_hi[attr_index]
+
+                    if value_lo < value_hi and stat_slot >= 0:
+                        state = (multiplier * state + increment) & mask
+                        raw_value = value_lo + int((state & int31_mask) % (value_hi - value_lo + 1))
+                        if pick_write < max_pick_count:
+                            stat_ids[seed, pick_write] = stat_slot
+                            raw_values[seed, pick_write] = raw_value
+                            pick_write += 1
+
+                        scaled_value = scale_lookup[raw_value]
+                        if stat_slot == 0:
+                            stats0 += scaled_value
+                        elif stat_slot == 1:
+                            stats1 += scaled_value
+                        elif stat_slot == 2:
+                            stats2 += scaled_value
+                        elif stat_slot == 3:
+                            stats3 += scaled_value
+
+                    for _ in range(attr_advance_counts[attr_index]):
+                        state = (multiplier * state + increment) & mask
+
+            visual_indices[seed] = visual_index
+            pick_counts[seed] = pick_write
+            total = stats0 + stats1 + stats2 + stats3
+
+            if stats0 > best_values[0] or (stats0 == best_values[0] and total > best_totals[0]):
+                best_values[0] = stats0
+                best_totals[0] = total
+                best_seeds[0] = seed
+                best_stats[0, 0] = stats0
+                best_stats[0, 1] = stats1
+                best_stats[0, 2] = stats2
+                best_stats[0, 3] = stats3
+                best_visual_indices[0] = visual_index
+
+            if stats1 > best_values[1] or (stats1 == best_values[1] and total > best_totals[1]):
+                best_values[1] = stats1
+                best_totals[1] = total
+                best_seeds[1] = seed
+                best_stats[1, 0] = stats0
+                best_stats[1, 1] = stats1
+                best_stats[1, 2] = stats2
+                best_stats[1, 3] = stats3
+                best_visual_indices[1] = visual_index
+
+            if stats2 > best_values[2] or (stats2 == best_values[2] and total > best_totals[2]):
+                best_values[2] = stats2
+                best_totals[2] = total
+                best_seeds[2] = seed
+                best_stats[2, 0] = stats0
+                best_stats[2, 1] = stats1
+                best_stats[2, 2] = stats2
+                best_stats[2, 3] = stats3
+                best_visual_indices[2] = visual_index
+
+            if stats3 > best_values[3] or (stats3 == best_values[3] and total > best_totals[3]):
+                best_values[3] = stats3
+                best_totals[3] = total
+                best_seeds[3] = seed
+                best_stats[3, 0] = stats0
+                best_stats[3, 1] = stats1
+                best_stats[3, 2] = stats2
+                best_stats[3, 3] = stats3
+                best_visual_indices[3] = visual_index
+
+            if total > best_total_value:
+                best_total_value = total
+                best_total_seed = seed
+                best_total_stats[0] = stats0
+                best_total_stats[1] = stats1
+                best_total_stats[2] = stats2
+                best_total_stats[3] = stats3
+                best_total_visual_index = visual_index
+
+        return (
+            visual_indices,
+            pick_counts,
+            stat_ids,
+            raw_values,
+            best_values,
+            best_totals,
+            best_seeds,
+            best_stats,
+            best_visual_indices,
+            best_total_value,
+            best_total_seed,
+            best_total_stats,
+            best_total_visual_index,
+        )
+
 
 class FastStatGenerator:
     """
@@ -356,6 +529,16 @@ class FastStatGenerator:
         if self._use_numba:
             return self._find_best_stats_numba(item_index, item_level, assets)
         return self._find_best_stats_python(item_index, item_level, assets)
+
+    def build_seed_archive_item_bytes(
+        self,
+        item_index: int,
+        item_level: int,
+        assets: AssetsParam = None,
+    ) -> bytes:
+        if self._use_numba:
+            return self._build_seed_archive_item_bytes_numba(item_index, item_level, assets)
+        return self._build_seed_archive_item_bytes_python(item_index, item_level, assets)
 
     def _find_best_stats_python(
         self,
@@ -506,6 +689,278 @@ class FastStatGenerator:
                 },
             },
         }
+
+    @staticmethod
+    def _build_best_entries(
+        best_values,
+        best_totals,
+        best_seeds,
+        best_stats,
+        best_visual_indices,
+        best_total_value,
+        best_total_seed,
+        best_total_stats,
+        best_total_visual_index,
+    ) -> list[tuple[int, int, int, int, int, int, int, int]]:
+        entries = []
+        for index in range(4):
+            entries.append(
+                (
+                    int(best_seeds[index]),
+                    int(best_values[index]),
+                    int(best_totals[index]),
+                    int(best_visual_indices[index]),
+                    int(best_stats[index][0]),
+                    int(best_stats[index][1]),
+                    int(best_stats[index][2]),
+                    int(best_stats[index][3]),
+                )
+            )
+
+        entries.append(
+            (
+                int(best_total_seed),
+                int(best_total_value),
+                int(best_total_value),
+                int(best_total_visual_index),
+                int(best_total_stats[0]),
+                int(best_total_stats[1]),
+                int(best_total_stats[2]),
+                int(best_total_stats[3]),
+            )
+        )
+        return entries
+
+    @staticmethod
+    def _records_blob_from_arrays(
+        max_pick_count: int,
+        visual_indices,
+        pick_counts,
+        stat_ids,
+        raw_values,
+    ) -> bytes:
+        seed_count = IJ2SeedArchive.SEED_COUNT
+        record_size = 4 + max_pick_count + (max_pick_count * 2)
+
+        if np is not None and hasattr(visual_indices, "dtype"):
+            records = np.zeros((seed_count, record_size), dtype=np.uint8)
+            records[:, 0:2] = visual_indices.view(np.uint8).reshape(seed_count, 2)
+            records[:, 2] = pick_counts
+            if max_pick_count > 0:
+                records[:, 4 : 4 + max_pick_count] = stat_ids
+                records[:, 4 + max_pick_count :] = raw_values.view(np.uint8).reshape(seed_count, max_pick_count * 2)
+            return records.tobytes()
+
+        blob = bytearray(seed_count * record_size)
+        for seed in range(seed_count):
+            offset = seed * record_size
+            visual_index = int(visual_indices[seed])
+            blob[offset] = visual_index & 0xFF
+            blob[offset + 1] = (visual_index >> 8) & 0xFF
+            blob[offset + 2] = int(pick_counts[seed]) & 0xFF
+            for pick_index in range(max_pick_count):
+                blob[offset + 4 + pick_index] = int(stat_ids[seed][pick_index]) & 0xFF
+                raw_value = int(raw_values[seed][pick_index])
+                raw_offset = offset + 4 + max_pick_count + (pick_index * 2)
+                blob[raw_offset] = raw_value & 0xFF
+                blob[raw_offset + 1] = (raw_value >> 8) & 0xFF
+        return bytes(blob)
+
+    def _build_seed_archive_item_bytes_numba(
+        self,
+        item_index: int,
+        item_level: int,
+        assets: AssetsParam = None,
+    ) -> bytes:
+        compiled_item = self._compiled_items[item_index]
+        max_pick_count = sum(int(selector[0]) for selector in compiled_item[3])
+        numeric_item = self._get_numeric_item(item_index)
+        _, _, scale_lookup_array = self._get_scale_data(item_index, item_level)
+        asset_count = len(assets) if isinstance(assets, list) else 1 if isinstance(assets, str) else 0
+
+        result = _build_seed_archive_numba(
+            *numeric_item,
+            scale_lookup_array,
+            np.int32(asset_count),
+            _get_float_lut(),
+            np.int64(self._lcg_multiplier),
+            np.int64(self._lcg_increment),
+            np.int32(max_pick_count),
+        )
+
+        (
+            visual_indices,
+            pick_counts,
+            stat_ids,
+            raw_values,
+            best_values,
+            best_totals,
+            best_seeds,
+            best_stats,
+            best_visual_indices,
+            best_total_value,
+            best_total_seed,
+            best_total_stats,
+            best_total_visual_index,
+        ) = result
+
+        best_entries = self._build_best_entries(
+            best_values,
+            best_totals,
+            best_seeds,
+            best_stats,
+            best_visual_indices,
+            best_total_value,
+            best_total_seed,
+            best_total_stats,
+            best_total_visual_index,
+        )
+        records_blob = self._records_blob_from_arrays(
+            max_pick_count,
+            visual_indices,
+            pick_counts,
+            stat_ids,
+            raw_values,
+        )
+        return IJ2SeedArchive.build_item_bytes(
+            item_index=item_index,
+            item_level=item_level,
+            max_pick_count=max_pick_count,
+            best_entries=best_entries,
+            records_blob=records_blob,
+        )
+
+    def _build_seed_archive_item_bytes_python(
+        self,
+        item_index: int,
+        item_level: int,
+        assets: AssetsParam = None,
+    ) -> bytes:
+        compiled_item = self._compiled_items[item_index]
+        compiled_selectors = compiled_item[3]
+        _, scale_lookup, _ = self._get_scale_data(item_index, item_level)
+        asset_count = len(assets) if isinstance(assets, list) else 1 if isinstance(assets, str) else 0
+        max_pick_count = sum(int(selector[0]) for selector in compiled_selectors)
+
+        seed_count = IJ2SeedArchive.SEED_COUNT
+        if np is not None:
+            visual_indices = np.zeros(seed_count, dtype=np.uint16)
+            pick_counts = np.zeros(seed_count, dtype=np.uint8)
+            stat_ids = np.zeros((seed_count, max_pick_count), dtype=np.uint8)
+            raw_values = np.zeros((seed_count, max_pick_count), dtype=np.uint16)
+        else:
+            visual_indices = [0] * seed_count
+            pick_counts = [0] * seed_count
+            stat_ids = [[0] * max_pick_count for _ in range(seed_count)]
+            raw_values = [[0] * max_pick_count for _ in range(seed_count)]
+
+        multiplier = self._lcg_multiplier
+        increment = self._lcg_increment
+
+        best_values = [-1, -1, -1, -1]
+        best_totals = [-1, -1, -1, -1]
+        best_seeds = [0, 0, 0, 0]
+        best_stats = [[0, 0, 0, 0] for _ in range(4)]
+        best_visual_indices = [0, 0, 0, 0]
+        best_total_value = -1
+        best_total_seed = 0
+        best_total_stats = [0, 0, 0, 0]
+        best_total_visual_index = 0
+
+        for seed in range(seed_count):
+            state = seed
+            visual_index = 0
+            if asset_count > 1:
+                state = (multiplier * state + increment) & _UINT32_MASK
+                visual_index = (state & _INT31_MASK) % asset_count
+
+            stats = [0, 0, 0, 0]
+            pick_write = 0
+
+            for ct, threshold, compiled_set in compiled_selectors:
+                state = (multiplier * state + increment) & _UINT32_MASK
+                if threshold < self._lcg_state_to_float(state):
+                    continue
+
+                direct_attrs, direct_count, total_count, step = compiled_set
+                if total_count <= 0:
+                    continue
+
+                last_index = total_count - 1
+
+                for _ in range(ct):
+                    state = (multiplier * state + increment) & _UINT32_MASK
+                    rand = self._lcg_state_to_float(state)
+                    idx = 0
+                    r = rand
+                    while step < r and idx < last_index:
+                        idx += 1
+                        r = f32(r - step)
+
+                    if idx >= direct_count:
+                        continue
+
+                    _, _, stat_slot, value_lo, value_hi, extra_ops = direct_attrs[idx]
+
+                    if value_lo < value_hi and stat_slot >= 0:
+                        state = (multiplier * state + increment) & _UINT32_MASK
+                        raw_value = value_lo + ((state & _INT31_MASK) % (value_hi - value_lo + 1))
+                        if pick_write < max_pick_count:
+                            stat_ids[seed][pick_write] = stat_slot
+                            raw_values[seed][pick_write] = raw_value
+                            pick_write += 1
+                        stats[stat_slot] += scale_lookup[raw_value]
+
+                    for op_kind, lo, hi in extra_ops:
+                        if op_kind == _OP_ADVANCE:
+                            state = (multiplier * state + increment) & _UINT32_MASK
+                        elif lo < hi:
+                            state = (multiplier * state + increment) & _UINT32_MASK
+
+            visual_indices[seed] = visual_index
+            pick_counts[seed] = pick_write
+            total = sum(stats)
+            for stat_index, stat_value in enumerate(stats):
+                if stat_value > best_values[stat_index] or (
+                    stat_value == best_values[stat_index] and total > best_totals[stat_index]
+                ):
+                    best_values[stat_index] = stat_value
+                    best_totals[stat_index] = total
+                    best_seeds[stat_index] = seed
+                    best_stats[stat_index] = stats.copy()
+                    best_visual_indices[stat_index] = visual_index
+
+            if total > best_total_value:
+                best_total_value = total
+                best_total_seed = seed
+                best_total_stats = stats.copy()
+                best_total_visual_index = visual_index
+
+        best_entries = self._build_best_entries(
+            best_values,
+            best_totals,
+            best_seeds,
+            best_stats,
+            best_visual_indices,
+            best_total_value,
+            best_total_seed,
+            best_total_stats,
+            best_total_visual_index,
+        )
+        records_blob = self._records_blob_from_arrays(
+            max_pick_count,
+            visual_indices,
+            pick_counts,
+            stat_ids,
+            raw_values,
+        )
+        return IJ2SeedArchive.build_item_bytes(
+            item_index=item_index,
+            item_level=item_level,
+            max_pick_count=max_pick_count,
+            best_entries=best_entries,
+            records_blob=records_blob,
+        )
 
     @staticmethod
     def _get_random_asset(rng: LCGStream, assets: AssetsParam) -> Optional[str]:

@@ -4,6 +4,52 @@ Reverse-engineered algorithm for Injustice 2's deterministic gear stat generatio
 
 For a fully deailed generation sequence refer to [the docs](/docs/generation_sequence.md).
 
+## Implementations
+
+This module currently exposes two generator implementations:
+
+### `StatGenerator`
+
+Use this when you want the closest 1:1 implementation of the game's behavior.
+
+- Mirrors the reverse-engineered game flow directly
+- Best for validation, correctness work, and tracing the original logic
+- Pure Python
+- Slower for brute-force workloads such as scanning all `65536` seeds for many items
+
+### `FastStatGenerator`
+
+Use this when you want the same outcomes with faster execution.
+
+- Built on precomputed / compiled catalog metadata
+- Caches derived data to disk
+- Includes optimized brute-force paths such as `find_best_stats(...)`
+- Intended for large searches, repeated queries, and pipeline jobs
+
+`FastStatGenerator` is the implementation used by the current IJ2 helper tooling and precompute pipeline.
+
+## Which One To Use
+
+- Use `StatGenerator` if you need the direct game-faithful implementation.
+- Use `FastStatGenerator` if you need speed and are okay using precomputed metadata and optimized execution paths.
+
+## Requirements
+
+### `StatGenerator`
+
+- Python only
+- No optional numeric dependencies required
+
+### `FastStatGenerator`
+
+- Works in pure Python, but best performance depends on optional packages:
+  - `numpy`
+  - `numba`
+- If those are missing, the class still works, but some optimized paths fall back to slower Python execution.
+- Writes cache artifacts next to the module, including:
+  - `stat_fast_cache.pkl`
+  - `lcg_float_lut.npy` when the float lookup table is built
+
 ## Data Source
 
 All item definitions, attribute sets, and generation parameters come from the server's **geardefinitionlist** object, fetched via:
