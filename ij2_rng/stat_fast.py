@@ -7,6 +7,8 @@ JSON/dict parsing with precompiled immutable tuples that can be cached to disk.
 
 import os
 import pickle
+import time
+import uuid
 from typing import Any, List, Optional, Tuple, Union
 
 try:
@@ -39,8 +41,7 @@ _OP_INT_RANGE = 2
 _UINT32_MASK = 0xFFFFFFFF
 _INT31_MASK = 0x7FFFFFFF
 _ATTRIBUTE_NAMES = ("Health", "Defense", "Strength", "Ability")
-_FLOAT_LUT = None
-_FLOAT_LUT_PATH = os.path.join(os.path.dirname(__file__), "lcg_float_lut.npy")
+_FLOAT_LUTS: dict[str, Any] = {}
 _NUMBA_ENABLED = np is not None and njit is not None
 
 
@@ -50,24 +51,63 @@ def _build_float_lut():
     return bits.view(np.float32) - np.float32(1.0)
 
 
-def _get_float_lut():
-    global _FLOAT_LUT
-    if _FLOAT_LUT is not None:
-        return _FLOAT_LUT
+def _default_cache_file(name: str) -> str:
+    return os.path.join(os.getcwd(), name)
+
+
+def _wait_for_file(path: str, timeout_seconds: float = 120.0, poll_seconds: float = 0.1) -> None:
+    deadline = time.perf_counter() + timeout_seconds
+    while time.perf_counter() < deadline:
+        if os.path.exists(path):
+            return
+        time.sleep(poll_seconds)
+    raise TimeoutError(f"Timed out waiting for cache file: {path}")
+
+
+def _get_float_lut(float_lut_path: str):
+    cached = _FLOAT_LUTS.get(float_lut_path)
+    if cached is not None:
+        return cached
 
     if np is None:
         raise RuntimeError("NumPy is required to build the float lookup table")
 
-    if os.path.exists(_FLOAT_LUT_PATH):
-        _FLOAT_LUT = np.load(_FLOAT_LUT_PATH, mmap_mode="r")
-        return _FLOAT_LUT
+    os.makedirs(os.path.dirname(float_lut_path) or ".", exist_ok=True)
 
-    lut = _build_float_lut()
-    temp_path = f"{_FLOAT_LUT_PATH}.{os.getpid()}.tmp.npy"
-    np.save(temp_path, lut)
-    os.replace(temp_path, _FLOAT_LUT_PATH)
-    _FLOAT_LUT = np.load(_FLOAT_LUT_PATH, mmap_mode="r")
-    return _FLOAT_LUT
+    if os.path.exists(float_lut_path):
+        lut = np.load(float_lut_path, mmap_mode="r")
+        _FLOAT_LUTS[float_lut_path] = lut
+        return lut
+
+    lock_path = f"{float_lut_path}.lock"
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        _wait_for_file(float_lut_path)
+        lut = np.load(float_lut_path, mmap_mode="r")
+        _FLOAT_LUTS[float_lut_path] = lut
+        return lut
+
+    try:
+        os.close(lock_fd)
+        if os.path.exists(float_lut_path):
+            lut = np.load(float_lut_path, mmap_mode="r")
+            _FLOAT_LUTS[float_lut_path] = lut
+            return lut
+
+        lut = _build_float_lut()
+        temp_path = f"{float_lut_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp.npy"
+        np.save(temp_path, lut)
+        os.replace(temp_path, float_lut_path)
+    finally:
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+
+    lut = np.load(float_lut_path, mmap_mode="r")
+    _FLOAT_LUTS[float_lut_path] = lut
+    return lut
 
 
 def _flatten_numeric_item(compiled_item: Tuple) -> Tuple["np.ndarray", ...]:
@@ -448,6 +488,7 @@ class FastStatGenerator:
         scale_boost_below_max: float = SCALE_BOOST_BELOW_MAX,
         scale_base: float = SCALE_BASE,
         cache_path: Optional[str] = None,
+        float_lut_path: Optional[str] = None,
     ):
         self.items = geardefinitionlist_data["items"]
         self.attribute_sets = geardefinitionlist_data["attributeSets"]
@@ -460,10 +501,8 @@ class FastStatGenerator:
         self._scale_boost_below_max = scale_boost_below_max
         self._scale_base = scale_base
 
-        self._cache_path = cache_path or os.path.join(
-            os.path.dirname(__file__),
-            "stat_fast_cache.pkl",
-        )
+        self._cache_path = cache_path or _default_cache_file("stat_fast_cache.pkl")
+        self._float_lut_path = float_lut_path or _default_cache_file("lcg_float_lut.npy")
         self._compiled_items = self._load_or_build_cache()
         self._scale_cache: dict[tuple[int, int], tuple[float, Tuple[int, ...], Optional["np.ndarray"]]] = {}
         self._numeric_item_cache: dict[int, Tuple["np.ndarray", ...]] = {}
@@ -659,7 +698,7 @@ class FastStatGenerator:
             *numeric_item,
             scale_lookup_array,
             advance_for_assets,
-            _get_float_lut(),
+            _get_float_lut(self._float_lut_path),
             np.int64(self._lcg_multiplier),
             np.int64(self._lcg_increment),
         )
@@ -782,7 +821,7 @@ class FastStatGenerator:
             *numeric_item,
             scale_lookup_array,
             np.int32(asset_count),
-            _get_float_lut(),
+            _get_float_lut(self._float_lut_path),
             np.int64(self._lcg_multiplier),
             np.int64(self._lcg_increment),
             np.int32(max_pick_count),

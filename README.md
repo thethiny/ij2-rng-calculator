@@ -46,7 +46,7 @@ Use this when you want the same outcomes with faster execution.
   - `numpy`
   - `numba`
 - If those are missing, the class still works, but some optimized paths fall back to slower Python execution.
-- Writes cache artifacts next to the module, including:
+- Writes cache artifacts to the configured cache location, including:
   - `stat_fast_cache.pkl`
   - `lcg_float_lut.npy` when the float lookup table is built
 

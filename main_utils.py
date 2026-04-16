@@ -46,7 +46,18 @@ def get_assets_for_item(hashmap: dict, item_index: int):
     return None
 
 
-def build_generator(catalog_data: dict, mode="default") -> Union[StatGenerator, FastStatGenerator]:
+def build_generator(
+    catalog_data: dict,
+    mode="default",
+    cache_dir: Optional[str] = None,
+) -> Union[StatGenerator, FastStatGenerator]:
+    cache_path = None
+    float_lut_path = None
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, "stat_fast_cache.pkl")
+        float_lut_path = os.path.join(cache_dir, "lcg_float_lut.npy")
+
     if mode == "default":
         return StatGenerator(
             geardefinitionlist_data=catalog_data,
@@ -68,6 +79,8 @@ def build_generator(catalog_data: dict, mode="default") -> Union[StatGenerator, 
             scale_boost_at_max=SCALE_BOOST_AT_MAX,
             scale_boost_below_max=SCALE_BOOST_BELOW_MAX,
             scale_base=SCALE_BASE,
+            cache_path=cache_path,
+            float_lut_path=float_lut_path,
         )
     raise ValueError(f"Unknown mode: {mode}")
 
