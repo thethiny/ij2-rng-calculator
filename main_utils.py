@@ -1,9 +1,9 @@
 import json
 import os
-from typing import Optional
+from typing import Optional, Union
 
 try:
-    from .ij2_rng import StatGenerator
+    from .ij2_rng import FastStatGenerator, StatGenerator
     from .ij2_rng.consts import (
         ATTRIBUTES_MAP,
         BASE_STAT_IDS,
@@ -14,7 +14,7 @@ try:
         SCALE_BOOST_BELOW_MAX,
     )
 except ImportError:
-    from ij2_rng import StatGenerator
+    from ij2_rng import FastStatGenerator, StatGenerator
     from ij2_rng.consts import (
         ATTRIBUTES_MAP,
         BASE_STAT_IDS,
@@ -46,17 +46,30 @@ def get_assets_for_item(hashmap: dict, item_index: int):
     return None
 
 
-def build_generator(catalog_data: dict) -> StatGenerator:
-    return StatGenerator(
-        geardefinitionlist_data=catalog_data,
-        lcg_multiplier=LCG_MULTIPLIER,
-        lcg_increment=LCG_INCREMENT,
-        attributes_map=ATTRIBUTES_MAP,
-        base_stat_ids=BASE_STAT_IDS,
-        scale_boost_at_max=SCALE_BOOST_AT_MAX,
-        scale_boost_below_max=SCALE_BOOST_BELOW_MAX,
-        scale_base=SCALE_BASE,
-    )
+def build_generator(catalog_data: dict, mode="fast") -> Union[StatGenerator, FastStatGenerator]:
+    if mode == "default":
+        return StatGenerator(
+            geardefinitionlist_data=catalog_data,
+            lcg_multiplier=LCG_MULTIPLIER,
+            lcg_increment=LCG_INCREMENT,
+            attributes_map=ATTRIBUTES_MAP,
+            base_stat_ids=BASE_STAT_IDS,
+            scale_boost_at_max=SCALE_BOOST_AT_MAX,
+            scale_boost_below_max=SCALE_BOOST_BELOW_MAX,
+            scale_base=SCALE_BASE,
+        )
+    if mode == "fast":
+        return FastStatGenerator(
+            geardefinitionlist_data=catalog_data,
+            lcg_multiplier=LCG_MULTIPLIER,
+            lcg_increment=LCG_INCREMENT,
+            attributes_map=ATTRIBUTES_MAP,
+            base_stat_ids=BASE_STAT_IDS,
+            scale_boost_at_max=SCALE_BOOST_AT_MAX,
+            scale_boost_below_max=SCALE_BOOST_BELOW_MAX,
+            scale_base=SCALE_BASE,
+        )
+    raise ValueError(f"Unknown mode: {mode}")
 
 
 def load_hashmap(path: str) -> Optional[dict]:
@@ -67,7 +80,11 @@ def load_hashmap(path: str) -> Optional[dict]:
         return json.load(f)
 
 
-def load_catalog_data(catalog_path) -> dict:
+def load_catalog_payload(catalog_path) -> dict:
     with open(catalog_path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+        return json.load(f)
+
+
+def load_catalog_data(catalog_path) -> dict:
+    raw = load_catalog_payload(catalog_path)
     return raw["data"]
