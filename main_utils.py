@@ -2,16 +2,28 @@ import json
 import os
 from typing import Optional
 
-from ij2_rng import StatGenerator
-from ij2_rng.consts import (
-    ATTRIBUTES_MAP,
-    BASE_STAT_IDS,
-    LCG_INCREMENT,
-    LCG_MULTIPLIER,
-    SCALE_BASE,
-    SCALE_BOOST_AT_MAX,
-    SCALE_BOOST_BELOW_MAX,
-)
+try:
+    from .ij2_rng import StatGenerator
+    from .ij2_rng.consts import (
+        ATTRIBUTES_MAP,
+        BASE_STAT_IDS,
+        LCG_INCREMENT,
+        LCG_MULTIPLIER,
+        SCALE_BASE,
+        SCALE_BOOST_AT_MAX,
+        SCALE_BOOST_BELOW_MAX,
+    )
+except ImportError:
+    from ij2_rng import StatGenerator
+    from ij2_rng.consts import (
+        ATTRIBUTES_MAP,
+        BASE_STAT_IDS,
+        LCG_INCREMENT,
+        LCG_MULTIPLIER,
+        SCALE_BASE,
+        SCALE_BOOST_AT_MAX,
+        SCALE_BOOST_BELOW_MAX,
+    )
 
 def get_assets_for_item(hashmap: dict, item_index: int):
     """
