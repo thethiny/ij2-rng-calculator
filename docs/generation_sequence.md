@@ -10,7 +10,9 @@ This is the difference between **single-asset** and **multi-asset** items.
 
 These items have one fixed appearance. The item definition stores a single MD5 hash (`mAssetHash`) pointing to one specific mesh/material combination.
 
-In the server catalog (geardefinitionlist), these items have **no `"p"` field** (or `"p": false`). In the game binary, `mAssetGroupIndex == -1`.
+In the canonical catalog payload (online `geardefinitionlist` or offline
+`ItemDefinitions` from `TweakVars`), these items have **no `"p"` field** (or
+`"p": false`). In the game binary, `mAssetGroupIndex == -1`.
 
 Examples: Epic gear, Legendary gear, Set pieces — visually unique items that always look the same regardless of seed.
 
@@ -63,7 +65,9 @@ The `GInventoryRandomStream` is initialized from the item's `RandomSeed` in `Cac
 | Multi-asset group with 1 entry | None (index is always 0) | Stats start from raw seed |
 | Multi-asset group with 2+ entries | 1 advance | Stats start from LCG(seed) |
 
-This is the `has_multiple_assets` parameter in `StatGenerator.generate()`. It cannot be determined from the geardefinitionlist alone — it requires the asset group sizes from `ITEMDEFINITIONSAUX.xxx`.
+This is the `has_multiple_assets` parameter in `StatGenerator.generate()`. It
+cannot be determined from the catalog payload alone - it requires the asset
+group sizes from `ITEMDEFINITIONSAUX.xxx`.
 
 ## Group size distribution
 

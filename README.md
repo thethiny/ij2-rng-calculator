@@ -52,15 +52,29 @@ Use this when you want the same outcomes with faster execution.
 
 ## Data Source
 
-All item definitions, attribute sets, and generation parameters come from the server's **geardefinitionlist** object, fetched via:
+All item definitions, attribute sets, and generation parameters come from the
+same canonical IJ2 catalog payload. There are two equivalent ways to obtain it:
+
+1. Online: the server's **geardefinitionlist** object, fetched via:
 
 ```
 GET /objects/geardefinitionlist/{id}
 ```
 
-This is an unauthenticated endpoint that returns the full gear catalog. The latest version used is `0.294@938` (object ID `5ada00cae9f89f37ec89c268`, updated 2018-05-22). A copy is stored in `data/geardefinitionlist.json`.
+2. Offline: the shipped `Asset/TweakVars.xxx` package, extracted to
+   `TweakVars.MKTweakVars.json`, then decoded from
+   `tweakVarMap["ItemDefinitions"]["bytes"]`.
 
-The `data` field of this object contains:
+In the extracted JSON, the `bytes` value is stored as a base64 string. That
+base64 payload is AES-decrypted, then `SLZ`-unpacked, to recover the same
+catalog JSON the game would otherwise download.
+
+For the latest retail build, these two sources match exactly at version
+`0.294@938` (object ID `5ada00cae9f89f37ec89c268`, updated 2018-05-22). A
+compatible copy is typically stored as `data/geardefinitionlist.json`, and the
+build pipeline can also emit `ItemDefinitions.catalog.json` from `TweakVars`.
+
+The catalog `data` field contains:
 | Key | Count | Purpose |
 |-----|-------|---------|
 | `items` | 24,366 | Item definitions. Array index == `ItemIndex`. |
@@ -111,7 +125,8 @@ if (mAssetGroupIndex != -1 && group.mItems.ArrayNum > 1) {
 - If the group has **>1 assets**, the LCG advances once before stat generation.
 - If the group has exactly **1 asset** (or the item is non-procedural), no LCG advance occurs.
 
-Whether a group has >1 assets is determined by `ITEMDEFINITIONSAUX.xxx`, not the geardefinitionlist.
+Whether a group has >1 assets is determined by `ITEMDEFINITIONSAUX.xxx`, not by
+the `ItemDefinitions` / `geardefinitionlist` payload alone.
 
 ### Step 3: Attribute Selection (Non-Power Path)
 
@@ -192,7 +207,9 @@ return 1.0f;
 | 30 | 20 | 0.800 (capped at dL) |
 | 30 (max) | 30 | 1.000 (boost=0.9) |
 
-Note: `dL` (design level), not `h` (max level = 30), controls the scaling curve. This field comes from the item's `"dL"` key in the geardefinitionlist items array.
+Note: `dL` (design level), not `h` (max level = 30), controls the scaling
+curve. This field comes from the item's `"dL"` key in the catalog `items[]`
+array.
 
 ### Step 5: Per-Pick Scaling
 
@@ -212,7 +229,9 @@ This is critical: `int(147 * 0.432) + int(83 * 0.432) = 63 + 35 = 98`, **not** `
 
 ## Power Is Not Used for Stats
 
-The geardefinitionlist sets `usePowerWhenGeneratingItems: false`. This means the `Power` field in the inventory **does not affect stat generation**. It only affects the sell price calculation in `GetSellValue`.
+The catalog payload sets `usePowerWhenGeneratingItems: false`. This means the
+`Power` field in the inventory **does not affect stat generation**. It only
+affects the sell price calculation in `GetSellValue`.
 
 The server accepts any Power value (0-255) without validation. The game client defaults uninitialized power to 256 (stored as `*(_WORD *)&__that.mPower = 256`), which is clamped to 100 in `CacheGeneratedData`.
 
@@ -247,6 +266,9 @@ Each attribute set (indexed by the selector's `s` field) contains an array of at
 
 ## Remaining Work: Asset Group Counts
 
-The `has_multiple_assets` parameter (whether `GetRandomAsset` advances the LCG) cannot be determined from the geardefinitionlist alone. It requires parsing `ITEMDEFINITIONSAUX.xxx` to check each procedural item's asset group member count.
+The `has_multiple_assets` parameter (whether `GetRandomAsset` advances the
+LCG) cannot be determined from the catalog payload alone. It requires parsing
+`ITEMDEFINITIONSAUX.xxx` to check each procedural item's asset group member
+count.
 
 The `p` flag in the catalog indicates a procedural/group item, but groups can have 1 or more assets. Only groups with >1 asset trigger the LCG advance.

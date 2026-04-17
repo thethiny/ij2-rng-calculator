@@ -40,8 +40,10 @@ class StatGenerator:
     """
     Generates gear stats from a RandomSeed, ItemLevel, and item definition.
 
-    The geardefinitionlist data must be loaded from the server's object store
-    (endpoint: /objects/geardefinitionlist/{id}) and passed to this class.
+    The canonical IJ2 catalog data must be loaded and passed to this class.
+    The source can be either:
+      - the online ``/objects/geardefinitionlist/{id}`` payload, or
+      - the offline ``ItemDefinitions`` payload decoded from ``TweakVars.xxx``.
 
     The data contains:
       - items[]: array where index == ItemIndex, with selectors (a.s), level
@@ -63,8 +65,8 @@ class StatGenerator:
     ):
         """
         Args:
-            geardefinitionlist_data: The 'data' dict from the geardefinitionlist
-                JSON object. Must contain 'items' and 'attributeSets' keys.
+            geardefinitionlist_data: The canonical catalog ``data`` dict.
+                Must contain ``items`` and ``attributeSets`` keys.
             lcg_multiplier: LCG multiplier (a in: next = a*seed + c).
             lcg_increment: LCG increment (c in: next = a*seed + c).
             attributes_map: Mapping of {attribute_id: display_name} for stats.
@@ -109,7 +111,7 @@ class StatGenerator:
         Args:
             seed: RandomSeed from the inventory item (uint16, 0-65535).
             item_level: ItemLevel from the inventory item (1-30).
-            item_index: ItemIndex -- position in the geardefinitionlist items array.
+            item_index: ItemIndex -- position in the catalog ``items`` array.
             assets: Visual asset information. Controls GetRandomAsset behavior:
                 - list[str]: Asset group hashes (e.g. from HashMap mGroups).
                   If len > 1, LCG advances once to pick the visual variant.

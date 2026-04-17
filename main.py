@@ -1,8 +1,10 @@
 """
 Usage example for the IJ2 gear stat generator.
 
-Loads the geardefinitionlist from the data/ folder and validates
-against 4 known items with confirmed in-game stats.
+Loads a canonical IJ2 catalog JSON from the data/ folder and validates against
+4 known items with confirmed in-game stats. The bundled
+``geardefinitionlist.json`` is compatible with the offline ``TweakVars``
+decode path used elsewhere in the repo.
 
 IJ2-specific constants are imported from consts.py and passed to
 the StatGenerator — the class itself is game-agnostic.
