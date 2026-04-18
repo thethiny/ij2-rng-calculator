@@ -56,7 +56,6 @@ class IJ2SeedArchive:
             "item_count": item_count,
             "selector_item_count": selector_item_count,
             "seed_count": seed_count,
-            "item_files": "items/{item_index}.bin",
         }
 
     @classmethod
