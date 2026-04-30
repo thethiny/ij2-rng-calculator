@@ -468,6 +468,96 @@ if _NUMBA_ENABLED:
             best_total_visual_index,
         )
 
+    @njit(cache=True, nogil=True)
+    def _generate_all_seeds_numba(
+        selector_cts,
+        selector_thresholds,
+        selector_direct_counts,
+        selector_total_counts,
+        selector_steps,
+        selector_attr_starts,
+        attr_stat_slots,
+        attr_value_lo,
+        attr_value_hi,
+        attr_advance_counts,
+        scale_lookup,
+        advance_for_assets,
+        float_lut,
+        multiplier,
+        increment,
+    ):
+        seed_count = 0x10000
+        out = np.zeros((seed_count, 5), dtype=np.int32)
+
+        mask = np.int64(_UINT32_MASK)
+        int31_mask = np.int64(_INT31_MASK)
+        mantissa_mask = np.int64(0x7FFFFF)
+
+        for seed in range(seed_count):
+            state = np.int64(seed)
+            if advance_for_assets:
+                state = (multiplier * state + increment) & mask
+
+            stats0 = 0
+            stats1 = 0
+            stats2 = 0
+            stats3 = 0
+
+            for selector_index in range(selector_cts.shape[0]):
+                state = (multiplier * state + increment) & mask
+                if selector_thresholds[selector_index] < float_lut[state & mantissa_mask]:
+                    continue
+
+                direct_count = selector_direct_counts[selector_index]
+                total_count = selector_total_counts[selector_index]
+                if total_count <= 0:
+                    continue
+
+                last_index = total_count - 1
+                step = selector_steps[selector_index]
+                attr_start = selector_attr_starts[selector_index]
+
+                for _ in range(selector_cts[selector_index]):
+                    state = (multiplier * state + increment) & mask
+                    r = float_lut[state & mantissa_mask]
+                    idx = 0
+                    while step < r and idx < last_index:
+                        idx += 1
+                        r = np.float32(r - step)
+
+                    if idx >= direct_count:
+                        continue
+
+                    attr_index = attr_start + idx
+                    stat_slot = attr_stat_slots[attr_index]
+                    value_lo = attr_value_lo[attr_index]
+                    value_hi = attr_value_hi[attr_index]
+
+                    if value_lo < value_hi and stat_slot >= 0:
+                        state = (multiplier * state + increment) & mask
+                        raw_value = value_lo + int((state & int31_mask) % (value_hi - value_lo + 1))
+                        scaled_value = scale_lookup[raw_value]
+
+                        if stat_slot == 0:
+                            stats0 += scaled_value
+                        elif stat_slot == 1:
+                            stats1 += scaled_value
+                        elif stat_slot == 2:
+                            stats2 += scaled_value
+                        elif stat_slot == 3:
+                            stats3 += scaled_value
+
+                    for _ in range(attr_advance_counts[attr_index]):
+                        state = (multiplier * state + increment) & mask
+
+            out[seed, 0] = stats0
+            out[seed, 1] = stats1
+            out[seed, 2] = stats2
+            out[seed, 3] = stats3
+            out[seed, 4] = stats0 + stats1 + stats2 + stats3
+
+        return out
+
 
 class FastStatGenerator:
     """
@@ -501,7 +591,7 @@ class FastStatGenerator:
         self._scale_boost_below_max = scale_boost_below_max
         self._scale_base = scale_base
 
-        self._cache_path = cache_path or _default_cache_file("stat_fast_cache.pkl")
+        self._cache_path = _default_cache_file("stat_fast_cache.pkl") if cache_path is None else cache_path
         self._float_lut_path = float_lut_path or _default_cache_file("lcg_float_lut.npy")
         self._compiled_items = self._load_or_build_cache()
         self._scale_cache: dict[tuple[int, int], tuple[float, Tuple[int, ...], Optional["np.ndarray"]]] = {}
@@ -568,6 +658,21 @@ class FastStatGenerator:
         if self._use_numba:
             return self._find_best_stats_numba(item_index, item_level, assets)
         return self._find_best_stats_python(item_index, item_level, assets)
+
+    def generate_all_seeds(
+        self,
+        item_index: int,
+        item_level: int,
+        assets: AssetsParam = None,
+    ):
+        if not self._compiled_items[item_index][3]:
+            empty = [[0, 0, 0, 0, 0]] * 0x10000
+            if np is not None:
+                return np.zeros((0x10000, 5), dtype=np.int32)
+            return empty
+        if self._use_numba:
+            return self._generate_all_seeds_numba(item_index, item_level, assets)
+        return self._generate_all_seeds_python(item_index, item_level, assets)
 
     def build_seed_archive_item_bytes(
         self,
@@ -728,6 +833,87 @@ class FastStatGenerator:
                 },
             },
         }
+
+    def _generate_all_seeds_numba(
+        self,
+        item_index: int,
+        item_level: int,
+        assets: AssetsParam = None,
+    ):
+        numeric_item = self._get_numeric_item(item_index)
+        _, _, scale_lookup_array = self._get_scale_data(item_index, item_level)
+        advance_for_assets = isinstance(assets, list) and len(assets) > 1
+
+        return _generate_all_seeds_numba(
+            *numeric_item,
+            scale_lookup_array,
+            advance_for_assets,
+            _get_float_lut(self._float_lut_path),
+            np.int64(self._lcg_multiplier),
+            np.int64(self._lcg_increment),
+        )
+
+    def _generate_all_seeds_python(
+        self,
+        item_index: int,
+        item_level: int,
+        assets: AssetsParam = None,
+    ) -> list:
+        compiled_item = self._compiled_items[item_index]
+        compiled_selectors = compiled_item[3]
+        _, scale_lookup, _ = self._get_scale_data(item_index, item_level)
+        advance_for_assets = isinstance(assets, list) and len(assets) > 1
+
+        multiplier = self._lcg_multiplier
+        increment = self._lcg_increment
+
+        results = []
+        for seed in range(0x10000):
+            state = seed
+            if advance_for_assets:
+                state = (multiplier * state + increment) & _UINT32_MASK
+
+            stats = [0, 0, 0, 0]
+
+            for ct, threshold, compiled_set in compiled_selectors:
+                state = (multiplier * state + increment) & _UINT32_MASK
+                if threshold < self._lcg_state_to_float(state):
+                    continue
+
+                direct_attrs, direct_count, total_count, step = compiled_set
+                if total_count <= 0:
+                    continue
+
+                last_index = total_count - 1
+
+                for _ in range(ct):
+                    state = (multiplier * state + increment) & _UINT32_MASK
+                    rand = self._lcg_state_to_float(state)
+                    idx = 0
+                    r = rand
+                    while step < r and idx < last_index:
+                        idx += 1
+                        r = f32(r - step)
+
+                    if idx >= direct_count:
+                        continue
+
+                    _, _, stat_slot, value_lo, value_hi, extra_ops = direct_attrs[idx]
+
+                    if value_lo < value_hi and stat_slot >= 0:
+                        state = (multiplier * state + increment) & _UINT32_MASK
+                        raw_value = value_lo + ((state & _INT31_MASK) % (value_hi - value_lo + 1))
+                        stats[stat_slot] += scale_lookup[raw_value]
+
+                    for op_kind, lo, hi in extra_ops:
+                        if op_kind == _OP_ADVANCE:
+                            state = (multiplier * state + increment) & _UINT32_MASK
+                        elif lo < hi:
+                            state = (multiplier * state + increment) & _UINT32_MASK
+
+            results.append([stats[0], stats[1], stats[2], stats[3], stats[0] + stats[1] + stats[2] + stats[3]])
+
+        return results
 
     @staticmethod
     def _build_best_entries(
@@ -1143,7 +1329,7 @@ class FastStatGenerator:
         return cached
 
     def _load_or_build_cache(self) -> Tuple[Tuple, ...]:
-        if os.path.exists(self._cache_path):
+        if self._cache_path and os.path.exists(self._cache_path):
             try:
                 with open(self._cache_path, "rb") as f:
                     payload = pickle.load(f)
@@ -1153,16 +1339,19 @@ class FastStatGenerator:
                 pass
 
         compiled_items = self._build_compiled_items()
-        payload = {
-            "version": _CACHE_VERSION,
-            "item_count": len(self.items),
-            "attribute_set_count": len(self.attribute_sets),
-            "first_item_name": self.items[0].get("i") if self.items else None,
-            "last_item_name": self.items[-1].get("i") if self.items else None,
-            "compiled_items": compiled_items,
-        }
-        with open(self._cache_path, "wb") as f:
-            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        if self._cache_path:
+            payload = {
+                "version": _CACHE_VERSION,
+                "item_count": len(self.items),
+                "attribute_set_count": len(self.attribute_sets),
+                "first_item_name": self.items[0].get("i") if self.items else None,
+                "last_item_name": self.items[-1].get("i") if self.items else None,
+                "compiled_items": compiled_items,
+            }
+            with open(self._cache_path, "wb") as f:
+                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
         return compiled_items
 
     def _is_cache_valid(self, payload: dict) -> bool:
