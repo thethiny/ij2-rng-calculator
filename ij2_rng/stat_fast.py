@@ -72,6 +72,11 @@ def _get_float_lut(float_lut_path: str):
     if np is None:
         raise RuntimeError("NumPy is required to build the float lookup table")
 
+    if not float_lut_path:
+        lut = _build_float_lut()
+        _FLOAT_LUTS[float_lut_path] = lut
+        return lut
+
     os.makedirs(os.path.dirname(float_lut_path) or ".", exist_ok=True)
 
     if os.path.exists(float_lut_path):
@@ -592,7 +597,7 @@ class FastStatGenerator:
         self._scale_base = scale_base
 
         self._cache_path = _default_cache_file("stat_fast_cache.pkl") if cache_path is None else cache_path
-        self._float_lut_path = float_lut_path or _default_cache_file("lcg_float_lut.npy")
+        self._float_lut_path = _default_cache_file("lcg_float_lut.npy") if float_lut_path is None else float_lut_path
         self._compiled_items = self._load_or_build_cache()
         self._scale_cache: dict[tuple[int, int], tuple[float, Tuple[int, ...], Optional["np.ndarray"]]] = {}
         self._numeric_item_cache: dict[int, Tuple["np.ndarray", ...]] = {}
