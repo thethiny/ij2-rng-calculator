@@ -16,7 +16,7 @@ Key code references (ij2_decompile/):
 """
 
 import ctypes
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from .consts import (
     ATTRIBUTES_MAP,
@@ -62,6 +62,7 @@ class StatGenerator:
         scale_boost_at_max: float = SCALE_BOOST_AT_MAX,
         scale_boost_below_max: float = SCALE_BOOST_BELOW_MAX,
         scale_base: float = SCALE_BASE,
+        scaled_effect_fields: Optional[dict] = None,
     ):
         """
         Args:
@@ -74,6 +75,9 @@ class StatGenerator:
             scale_boost_at_max: Boost multiplier when level == maxLevel.
             scale_boost_below_max: Boost multiplier when level < maxLevel.
             scale_base: Additive base after boost multiplication.
+            scaled_effect_fields: Optional mapping of generated attribute id
+                to parameter ids that should receive the level scale factor.
+                When omitted, this is read from the catalog payload.
         """
         self.items = geardefinitionlist_data["items"]
         self.attribute_sets = geardefinitionlist_data["attributeSets"]
@@ -85,9 +89,39 @@ class StatGenerator:
         self._scale_boost_at_max = scale_boost_at_max
         self._scale_boost_below_max = scale_boost_below_max
         self._scale_base = scale_base
+        self._scaled_effect_fields = self._normalize_scaled_effect_fields(
+            scaled_effect_fields
+            if scaled_effect_fields is not None
+            else geardefinitionlist_data.get("scaledEffectFields", {})
+        )
 
         # Reverse lookup: stat name -> attribute id (for _apply_scale_per_pick)
         self._name_to_id = {v: k for k, v in attributes_map.items()}
+
+    @staticmethod
+    def _normalize_scaled_effect_fields(raw_fields: Optional[dict]) -> dict[int, set[str]]:
+        """Normalize catalog scale metadata into ``{attr_id: {param_ids}}``."""
+        if not raw_fields:
+            return {}
+
+        normalized = {}
+        for raw_attr_id, raw_params in raw_fields.items():
+            try:
+                attr_id = int(raw_attr_id)
+            except (TypeError, ValueError):
+                continue
+
+            if isinstance(raw_params, str):
+                params = {raw_params}
+            else:
+                try:
+                    params = {str(param) for param in raw_params}
+                except TypeError:
+                    continue
+
+            if params:
+                normalized[attr_id] = params
+        return normalized
 
     def _make_rng(self, seed: int) -> LCGStream:
         return LCGStream(seed, self._lcg_multiplier, self._lcg_increment)
@@ -122,6 +156,7 @@ class StatGenerator:
         Returns:
             Dict with keys:
               - picks: list of (stat_name, raw_value) per pick
+              - effects: list of rolled non-base effect dicts
               - scale_factor: the CalculateScaleFactor result
               - stats: dict of {stat_name: final_displayed_value}
               - visual_hash: str or None — the selected visual asset hash
@@ -133,7 +168,7 @@ class StatGenerator:
         visual_hash = self._get_random_asset(rng, assets)
 
         # Process all selectors (non-power path: AttributeList::Add)
-        picks = self._process_selectors(rng, item_def)
+        picks, effects = self._process_selectors(rng, item_def)
 
         # CalculateScaleFactor
         scale = self._calculate_scale_factor(
@@ -145,9 +180,11 @@ class StatGenerator:
 
         # Apply Multiply per-pick, then sum
         stats = self._apply_scale_per_pick(picks, scale)
+        effects = self._apply_scale_to_effects(effects, scale)
 
         return {
             "picks": picks,
+            "effects": effects,
             "scale_factor": scale,
             "stats": stats,
             "visual_hash": visual_hash,
@@ -271,7 +308,7 @@ class StatGenerator:
         idx = lcg_to_int_range(seed, 0, count - 1)
         return assets[idx]
 
-    def _process_selectors(self, rng: LCGStream, item_def: dict) -> list:
+    def _process_selectors(self, rng: LCGStream, item_def: dict) -> Tuple[list, list]:
         """
         Process all attribute selectors for an item.
 
@@ -279,60 +316,92 @@ class StatGenerator:
         The item's a.s array contains selectors, each referencing an attributeSet
         by index (s), with a pick count (ct) and chance (ch).
 
-        Returns list of (stat_name, raw_value) tuples.
+        Returns:
+            Tuple of:
+              - list of (stat_name, raw_value) tuples for base-stat rolls
+              - list of rolled non-base effect dicts
         """
         picks = []
+        effects = []
         selectors = item_def.get("a", {}).get("s", [])
 
         for selector in selectors:
-            ct = selector["ct"]
-            set_index = selector["s"]
-            chance = selector["ch"]
+            selector_picks, selector_effects = self._process_selector(rng, selector)
+            picks.extend(selector_picks)
+            effects.extend(selector_effects)
 
-            # Chance check: advance LCG, compare float
+        return picks, effects
+
+    def _process_selector(self, rng: LCGStream, selector: dict) -> Tuple[list, list]:
+        """
+        Process one AttributeSelectorDefinition.
+
+        AttributeList::Add chooses uniformly from direct attributes plus nested
+        selectors. Nested selectors recurse and perform their own chance/count
+        rolls; they are not skipped or flattened.
+        """
+        ct = selector["ct"]
+        set_index = selector["s"]
+        chance = selector["ch"]
+        picks = []
+        effects = []
+
+        # Chance check: advance LCG, compare float.
+        rand = rng.next_float()
+        threshold = ctypes.c_float(chance / 100.0).value
+        if threshold < rand:
+            return picks, effects
+
+        attr_set = self.attribute_sets[set_index]
+        direct_attrs = attr_set.get("a", {}).get("a", [])
+        sub_selectors = attr_set.get("a", {}).get("s", [])
+        direct_count = len(direct_attrs)
+        total_count = direct_count + len(sub_selectors)
+
+        if total_count <= 0:
+            return picks, effects
+
+        step = ctypes.c_float(1.0 / float(total_count)).value
+
+        for _ in range(ct):
             rand = rng.next_float()
-            threshold = ctypes.c_float(chance / 100.0).value
-            if threshold < rand:
-                continue
+            idx = 0
+            r = rand
+            while step < r and idx < total_count - 1:
+                idx += 1
+                r = ctypes.c_float(r - step).value
 
-            attr_set = self.attribute_sets[set_index]
-            direct_attrs = attr_set.get("a", {}).get("a", [])
-            sub_selectors = attr_set.get("a", {}).get("s", [])
-            direct_count = len(direct_attrs)
-            total_count = direct_count + len(sub_selectors)
+            if idx < direct_count:
+                attr_picks, effect = self._create_attribute(rng, direct_attrs[idx])
+                picks.extend(attr_picks)
+                if effect is not None:
+                    effects.append(effect)
+            else:
+                nested_picks, nested_effects = self._process_selector(
+                    rng,
+                    sub_selectors[idx - direct_count],
+                )
+                picks.extend(nested_picks)
+                effects.extend(nested_effects)
 
-            if total_count <= 0:
-                continue
+        return picks, effects
 
-            step = ctypes.c_float(1.0 / float(total_count)).value
-
-            # Pick ct attributes from the set
-            for _ in range(ct):
-                rand = rng.next_float()
-                idx = 0
-                r = rand
-                while step < r and idx < total_count - 1:
-                    idx += 1
-                    r = ctypes.c_float(r - step).value
-
-                if idx < direct_count:
-                    attr = direct_attrs[idx]
-                    attr_picks = self._create_attribute(rng, attr)
-                    picks.extend(attr_picks)
-
-        return picks
-
-    def _create_attribute(self, rng: LCGStream, attr_def: dict) -> list:
+    def _create_attribute(self, rng: LCGStream, attr_def: dict) -> Tuple[list, Optional[dict]]:
         """
         Create an attribute from its definition by reading parameters.
 
-        Implements the Create -> SerializeFrom chain for base stats.
+        Implements the Create -> SerializeFrom chain for both base stats and
+        non-base effect attributes.
 
-        Returns list of (stat_name, raw_value) tuples (usually 1 entry).
+        Returns:
+            Tuple of:
+              - list of (stat_name, raw_value) tuples (usually 0 or 1 entries)
+              - optional effect dict for non-base attributes
         """
         attr_id = attr_def["i"]
         attr_name = self._attributes_map.get(attr_id, f"attr_{attr_id}")
         picks = []
+        effect = None
 
         for param in attr_def.get("p", []):
             param_id = param["id"]
@@ -340,15 +409,28 @@ class StatGenerator:
             if param_id == "value" and "i" in param:
                 lo = param["i"]["l"]
                 hi = param["i"]["h"]
-                if lo < hi:
-                    val = rng.next_int_range(lo, hi)
+                val = rng.next_int_range(lo, hi) if lo < hi else lo
+                if attr_id in self._base_stat_ids:
                     picks.append((attr_name, val))
+                elif effect is None:
+                    effect = {
+                        "attr_id": attr_id,
+                        "attr_name": attr_name,
+                        "param": param_id,
+                        "value": val,
+                        "raw_value": val,
+                    }
 
-            elif param_id in ("base", "amount", "damage") and "f" in param:
-                lo_f = param["f"]["l"]
-                hi_f = param["f"]["h"]
-                if lo_f < hi_f:
-                    rng.advance()
+            elif param_id != "set":
+                value = self._roll_non_stat_parameter(rng, param)
+                if effect is None and value is not None:
+                    effect = {
+                        "attr_id": attr_id,
+                        "attr_name": attr_name,
+                        "param": param_id,
+                        "value": value,
+                        "raw_value": value,
+                    }
 
             elif param_id == "set" and "i" in param:
                 lo = param["i"]["l"]
@@ -356,7 +438,24 @@ class StatGenerator:
                 if lo < hi:
                     rng.next_int_range(lo, hi)
 
-        return picks
+        return picks, effect
+
+    def _roll_non_stat_parameter(self, rng: LCGStream, param: dict):
+        if "i" in param:
+            lo = param["i"]["l"]
+            hi = param["i"]["h"]
+            return rng.next_int_range(lo, hi) if lo < hi else lo
+
+        if "f" in param:
+            lo = param["f"]["l"]
+            hi = param["f"]["h"]
+            if lo >= hi:
+                return lo
+            span = f32(float(hi) - float(lo))
+            rolled = f32(float(lo) + f32(rng.next_float() * span))
+            return rolled
+
+        return None
 
     def _calculate_scale_factor(
         self,
@@ -405,3 +504,24 @@ class StatGenerator:
                 scaled = raw_value
             stats[stat_name] = stats.get(stat_name, 0) + scaled
         return stats
+
+    def _apply_scale_to_effects(self, effects: list, scale_factor: float) -> list:
+        """
+        Apply Data::Multiply to non-base generated attributes.
+
+        Only fields marked by the catalog-provided scale metadata are scaled.
+        ``raw_value`` is retained so the renderer can still find the source
+        definition range after ``value`` has been multiplied.
+        """
+        scaled_effects = []
+        for effect in effects:
+            copied = dict(effect)
+            fields = self._scaled_effect_fields.get(copied.get("attr_id"), set())
+            if copied.get("param") in fields and isinstance(copied.get("value"), (int, float)):
+                copied["raw_value"] = copied["value"]
+                copied["value"] = f32(f32(float(copied["value"])) * f32(scale_factor))
+                copied["scaled"] = True
+            else:
+                copied["scaled"] = False
+            scaled_effects.append(copied)
+        return scaled_effects
